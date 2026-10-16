@@ -1,1 +1,1 @@
-# Hardware-Efficient-Real-Time-Purkinje-Cell-Spike-Sorting-Architecture
+# SpikeDuet
