@@ -1,0 +1,28 @@
+{
+ "source": "braille calibration profile (validation split)",
+ "num_samples": 810,
+ "num_timesteps": 51,
+ "layers": {
+  "0": {
+   "active_inputs": 5.886250302590172,
+   "nonempty_fraction": 0.824715565238441,
+   "binary": true,
+   "launches": 1.1829339143064632,
+   "pairs": 6.618591140159768
+  },
+  "1": {
+   "active_inputs": 5.427741466957153,
+   "nonempty_fraction": 0.9058823529411765,
+   "binary": true,
+   "launches": 4.239917695473251,
+   "pairs": 6.334858387799565
+  },
+  "2": {
+   "active_inputs": 9.062817719680465,
+   "nonempty_fraction": 0.8953280077463084,
+   "binary": true,
+   "launches": 2.6826676349552168,
+   "pairs": 24.001331396756232
+  }
+ }
+}

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spikeduet"
+version = "0.1.0"
+description = "Compile stateful snnTorch spiking neural networks to C for microcontrollers (portable C99 and Silicon Labs EFR32 with the MVP accelerator)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+    "snntorch==1.0.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+hil = ["pyserial>=3.5"]
+dev = ["pytest>=7", "pyserial>=3.5"]
+
+[tool.setuptools.packages.find]
+include = ["spikeduet*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

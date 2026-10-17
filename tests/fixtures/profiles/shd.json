@@ -1,0 +1,21 @@
+{
+ "source": "shd calibration profile (validation split)",
+ "num_samples": 815,
+ "num_timesteps": 100,
+ "layers": {
+  "0": {
+   "active_inputs": 61.09047852760736,
+   "nonempty_fraction": 0.7159631901840491,
+   "binary": true,
+   "launches": 4.032073619631902,
+   "pairs": 57.242969325153375
+  },
+  "1": {
+   "active_inputs": 9.999546012269938,
+   "nonempty_fraction": 0.9795950920245399,
+   "binary": true,
+   "launches": 1.245042944785276,
+   "pairs": 21.31278527607362
+  }
+ }
+}

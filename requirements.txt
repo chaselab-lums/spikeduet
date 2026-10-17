@@ -1,0 +1,5 @@
+# Compiler: frontend, IR, passes, backends, reference simulator
+torch>=2.0
+snntorch==1.0.0          # neuron semantics are verified against this exact release
+numpy>=1.24
+scipy>=1.10             # hidden-neuron reordering (spikeduet.backend.efr32.reorder)

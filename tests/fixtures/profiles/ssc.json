@@ -1,0 +1,28 @@
+{
+ "source": "ssc calibration profile (validation split)",
+ "num_samples": 9981,
+ "num_timesteps": 100,
+ "layers": {
+  "0": {
+   "active_inputs": 65.25331429716461,
+   "nonempty_fraction": 0.9765654744013625,
+   "binary": true,
+   "launches": 5.618040276525398,
+   "pairs": 61.09920248472097
+  },
+  "1": {
+   "active_inputs": 7.825268009217513,
+   "nonempty_fraction": 0.9376094579701433,
+   "binary": true,
+   "launches": 1.5694810139264603,
+   "pairs": 12.290424807133554
+  },
+  "2": {
+   "active_inputs": 5.827854924356277,
+   "nonempty_fraction": 0.8375533513675985,
+   "binary": true,
+   "launches": 1.2651026951207294,
+   "pairs": 11.28097685602645
+  }
+ }
+}
