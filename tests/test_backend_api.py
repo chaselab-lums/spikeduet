@@ -28,6 +28,21 @@ def test_get_backend_unknown_name_raises():
         get_backend("mvp_only_backend_that_does_not_exist")
 
 
+@pytest.mark.parametrize("pipeline", ["baseline", "licm", "fusion", "optimized"])
+def test_cortex_m55_uses_public_api_and_named_pipelines(pipeline):
+    from spikeduet.backend.cortex_m55 import CortexM55Backend
+    from spikeduet.ir.pass_manager import compile_source_to_execution_ir, get_pipeline
+
+    ir = _source_ir()
+    module = compile_source_to_execution_ir(ir, num_timesteps=5, pipeline=get_pipeline(pipeline))
+    direct = CortexM55Backend().generate(module, realization="helium_event", include_harness=True)
+    artifact = compile_model(ir, backend="cortex_m55", num_timesteps=5, pipeline=pipeline,
+                             realization="helium_event", include_harness=True)
+    assert isinstance(get_backend("cortex_m55"), CortexM55Backend)
+    assert artifact.files == direct.files
+    assert {"m55_runtime.c", "m55_kernels.h", "m55_weights.h", "main.c"} <= artifact.files.keys()
+
+
 def test_compile_model_portable_c_produces_expected_files():
     artifact = compile_model(_source_ir(), backend="portable_c", num_timesteps=5)
     assert set(artifact.files) == {

@@ -4,14 +4,15 @@
 
 The name refers to the EFR32 target: the Cortex-M33 and the MVP matrix accelerator play together, and the compiler decides which of the two runs each layer.
 
-SpikeDuet takes a trained `snntorch` model, turns it into a verified intermediate representation, optimizes its timestep schedule, and generates C code for one of two backends:
+SpikeDuet takes a trained `snntorch` model or a supported NIR graph, turns it into a verified intermediate representation, optimizes its timestep schedule, and generates C code:
 
 | Backend | Output | Dependencies |
 |---|---|---|
 | `portable_c` | Plain C99 that builds with gcc or clang on any target | none |
 | `efr32` | Firmware sources for Silicon Labs EFR32 Series-2 parts. Dense matrix work runs on the MVP accelerator or on the Cortex-M33; LIF state runs on the Cortex-M33 | Simplicity SDK (`sl_math_mvp`) |
+| `cortex_m55` (experimental) | C99 runtime with scalar or Helium/MVE affine kernels | Arm MVE for vector execution; scalar emulation on a host |
 
-Every generated build reproduces the Python reference simulator, and the simulator reproduces `snntorch.Leaky` (`snntorch==1.0.0`) exactly.
+The Python reference simulator implements `snntorch.Leaky` (`snntorch==1.0.0`) semantics. Generated runtimes are checked against it; FP16 MVP arithmetic and opt-in int8 weight storage can change numerical results.
 
 ```
 snnTorch nn.Module
@@ -193,6 +194,40 @@ prediction = sum(t.mem[-1] for t in traces).argmax(dim=1)
 
 Every backend reads out the same way: it sums the final layer's membrane over all timesteps and takes the argmax.
 
+## NIR frontend
+
+Install the optional interchange dependencies with `pip install -e ".[nir]"`:
+
+```python
+import nir
+from spikeduet import parse_nir_graph, snntorch_chain_to_nir, compile_model
+
+ir = parse_nir_graph(nir.read("network.nir"), dt=1e-4)
+artifact = compile_model(ir, backend="portable_c", num_timesteps=25, pipeline="optimized")
+
+# Preserve snnTorch reset semantics in metadata for a lossless round trip.
+graph = snntorch_chain_to_nir(model, annotate=True)
+ir = parse_nir_graph(graph, dt=1e-4, semantics="annotated")
+```
+
+Graphs must form one chain. Affine/Linear, Scale, Flatten, Conv1d/2d and supported pooling nodes are folded into dense affine layers; LIF, IF and terminal LI nodes become neuron layers. Dense convolution lowering is intended for small models and bounded by `max_dense_weights`. Unsupported graphs fail explicitly. Choose `discretization="exp"` for exponential, zero-order-hold neuron dynamics; the default is forward Euler. Unannotated NIR semantics do not preserve snnTorch subtract reset or delayed reset automatically.
+
+## Extended neuron semantics
+
+Hand-built source IR can use `LinearLayer.synapse_delays`, `LIFLayer.spike_state`, `LIFLayer.adaptation=AdaptiveThresholdSpec(...)`, and `SNNModel.readout_weights`. Verification, reference execution and lowering carry these features into generated portable-C and EFR32 CPU engines. Unsupported EFR32 MVP, event-driven and folded realizations reject them explicitly. Fixed delays use compact history bitmasks when the producer is provably binary.
+
+These are core IR features. The workload-specific FilterBank and ConvSNN frontends are not included.
+
+## Cortex-M55 backend (experimental)
+
+```python
+artifact = compile_model(ir, backend="cortex_m55", num_timesteps=25,
+                         pipeline="optimized", realization="helium_dense")
+artifact.write("build/m55")
+```
+
+`realization` accepts `scalar_dense`, `scalar_event`, `helium_dense`, `helium_event`, or a dictionary mapping layer indices to those names (unspecified layers use `scalar_dense`). Per-synapse delays require `scalar_dense` on that layer. The runtime keeps the portable `iscas_model_*` API and emits `m55_runtime.c`, `m55_kernels.h` and padded weight tables. Compile with `-ffp-contract=off` to preserve accumulation semantics; `M55_CFLAGS` in `spikeduet.backend.cortex_m55` supplies the target flags. Host builds emulate the MVE intrinsics. Backend selection does not perform automatic M55 placement.
+
 ## Portable-C backend
 
 ```python
@@ -279,6 +314,19 @@ All options are off by default. With every option off the output is the plain de
 | Option | Engine | What it does |
 |---|---|---|
 | `stage_profile=True` | cpu, mvp | Emit per-stage DWT cycle markers. They compile to nothing unless the build defines `ISCAS_STAGE_PROFILE` |
+
+### Additional EFR32 options
+
+| Option | Scope | Behavior |
+|---|---|---|
+| `speed=True` | CPU or MVP | Specialized LIF updates and eligible silent-neuron elimination; defaults off |
+| `bitmask_delays=False` | CPU | Use float history rings instead of compact binary delay histories |
+| `exact_floats=True` | Header generation | Lossless float32 literals instead of the original decimal formatting |
+| `int8_weights=True` | Plain dense MVP | Per-row int8 flash tables expanded to FP16 SRAM weights during initialization; MVP arithmetic remains FP16 |
+
+Int8 storage is lossy and incompatible with sparse, hybrid, windowed and other weight-access paths; unsupported combinations raise an error. Validate model accuracy when enabling it. New neuron semantics require the bundled updated `runtime/efr32/snn.h`.
+
+`BoardPower.at_clock(clock_hz, floor_prop=0.33)` estimates power at another clock from the calibrated board model. It is an extrapolation, not a hardware measurement.
 
 ### Automatic placement
 
@@ -518,7 +566,7 @@ Run `pytest` before and after a change. If you touch any code generator, also ru
 
 ## Limitations
 
-- **Topology:** the frontend accepts only `[Linear -> Leaky]^N` chains: no convolution, recurrence or skip connections.
+- **Topology:** the snnTorch frontend accepts `[Linear -> Leaky]^N` chains. The NIR frontend also supports small convolution/pooling chains through dense lowering. General recurrent graphs, branches and skip connections remain unsupported.
 - **Batch:** the generated runtimes process one sample at a time.
 - **EFR32 coverage:** developed and measured on EFR32MG24 (39 MHz HFXO) and EFM32PG28. Other Series-2 parts with the MVP should work but are untested.
 - **Cost models:** calibrated on specific layer shapes. For shapes far from them, treat `engine="auto"` estimates as guidance and measure.

@@ -98,3 +98,35 @@ def test_sleeping_while_waiting_saves_only_the_wait_and_never_touches_the_m33_ba
     # the blocking schedule waits for the whole chain, so it gains at least as much as async
     assert (base["blocking"].energy_mj - sleep["blocking"].energy_mj) >= (base["async"].energy_mj - sleep["async"].energy_mj)
     assert mapping_estimates(m33, STEPS, p, sleep_while_waiting=True)["blocking"] == mapping_estimates(m33, STEPS, p)["blocking"]
+
+
+def test_at_clock_scales_increments_with_frequency_and_time_with_its_inverse():
+    p = PG28_PRO_KIT
+    assert p.at_clock(p.clock_hz).p_cpu_mw == pytest.approx(p.p_cpu_mw)          # identity at the measured clock
+    q = p.at_clock(2 * p.clock_hz, floor_prop=0.0)
+    assert q.dp_mvp_mw == pytest.approx(2 * p.dp_mvp_mw) and q.sleep_saving_mw == pytest.approx(2 * p.sleep_saving_mw)
+    assert q.p_em1_mw == pytest.approx(p.p_em1_mw)                                # floor f-independent at floor_prop=0
+    c = p.at_clock(2 * p.clock_hz)                                                # default 0.33 (datasheet-based central value)
+    assert c.p_em1_mw == pytest.approx(p.p_em1_mw * 1.33)
+    assert q.p_cpu_mw - q.p_em1_mw == pytest.approx(2 * (p.p_cpu_mw - p.p_em1_mw))
+    half = p.at_clock(p.clock_hz / 2, floor_prop=0.5)
+    assert half.p_em1_mw == pytest.approx(p.p_em1_mw * 0.75)                      # half the floor tracks f
+    with pytest.raises(ValueError):
+        p.at_clock(80e6, floor_prop=1.5)
+
+def test_energy_per_inference_falls_with_clock_but_the_mvp_gain_shrinks():
+    """Race to idle: the f-independent floor is paid for less time at a higher clock, so every build gets cheaper; the
+    heterogeneous saving (it removes floor-priced time but adds f-proportional MVP power) shrinks."""
+    c = overlap_cost(LAYERS, _act(4.0, 60.0), 0, steps=STEPS)
+    m33 = overlap_cost(LAYERS, _act(4.0, 60.0), None, steps=STEPS)
+    gain = {}
+    energy = {}
+    for f in (19.5e6, 39e6, 78e6):
+        p = PG28_PRO_KIT.at_clock(f)
+        e_m33 = mapping_estimates(m33, STEPS, p)["blocking"]
+        e_async = mapping_estimates(c, STEPS, p)["async"]
+        energy[f] = e_m33.energy_mj
+        gain[f] = 1.0 - e_async.energy_mj / e_m33.energy_mj
+        assert e_m33.time_s == pytest.approx(m33.blocking_cycles * STEPS / f)
+    assert energy[19.5e6] > energy[39e6] > energy[78e6]
+    assert gain[19.5e6] > gain[39e6] > gain[78e6]

@@ -187,6 +187,22 @@ static inline void iscas_lif_update_inhibition_layer(
     }
 }
 
+/* Stored-spike delayed reset with optional adaptive threshold (ALIF). */
+static inline void iscas_lif_update_spike_state(
+    float current, float old_mem, float beta, float threshold, float prev_spike,
+    int has_adapt, float rho, float a, float *adapt,
+    float *out_spike, float *out_new_mem)
+{
+    float th_eff = threshold;
+    if (has_adapt) {
+        *adapt = (rho * (*adapt)) + prev_spike;
+        th_eff = threshold + (a * (*adapt));
+    }
+    float new_mem = (beta * old_mem) + current - prev_spike * th_eff;
+    *out_spike = (new_mem > th_eff) ? 1.0f : 0.0f;
+    *out_new_mem = new_mem;
+}
+
 /* Engine contract, implemented by the generated snn.c. */
 void snn_init(void);
 

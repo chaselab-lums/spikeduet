@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 hil = ["pyserial>=3.5"]
+nir = ["nir>=1.0.8,<2", "nirtorch>=2.6,<3"]
 dev = ["pytest>=7", "pyserial>=3.5"]
 
 [tool.setuptools.packages.find]

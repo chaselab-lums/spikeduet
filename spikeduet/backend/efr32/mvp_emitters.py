@@ -22,6 +22,9 @@ from spikeduet.ir.execution import AffineOp, ConvertOp, ExecutionModule, LIFUpda
 from spikeduet.ir.execution_analysis import consumers, producers
 
 
+from spikeduet.backend.schedule_common import emit_lif_speed, emit_lif_fast, plain_delayed_subtract
+
+
 def mvp_direct_fused_layer_indices(module: ExecutionModule) -> Set[int]:
     """Affine layers whose input is written directly by a non-inhibited LIF (fusion ran).
 
@@ -62,9 +65,17 @@ def mvp_direct_affine_emitter(direct_fused: Set[int]):
     return emitter
 
 
-def mvp_direct_lif_emitter(direct_fused: Set[int]):
-    """LIF emitter whose output feeds a ``direct_fused`` layer: same ``iscas_lif_update()`` call
-    as ``emit_lif``, but the spike is stored as FP16 into the next layer's MVP input."""
+def mvp_direct_lif_emitter(direct_fused: Set[int], speed: bool = False):
+    """Returns a `LifEmitter`: for a `LIFUpdateOp` whose `output_spike`
+    feeds a direct-FP16-fused layer (see `_mvp_direct_fused_layer_indices`),
+    writes the final emitted spike straight into that layer's
+    `g_in_f16[idx]` -- the SAME `iscas_lif_update()` call as the shared
+    `emit_lif` (semantics never re-derived, only the destination of the
+    already-computed result differs, per B4 Phase B2.5 Part 5's
+    requirement). Every other `LIFUpdateOp` (unfused, inhibited,
+    final-layer output, or any edge in a build where fusion never ran)
+    falls back to the unmodified `emit_lif` -- identical text to
+    EFR32-CPU/portable-C for those edges."""
 
     def emitter(op: LIFUpdateOp) -> List[str]:
         target_idx: Optional[int] = None
@@ -74,7 +85,10 @@ def mvp_direct_lif_emitter(direct_fused: Set[int]):
                 target_idx = candidate
 
         if target_idx is None:
-            return emit_lif(op)
+            return emit_lif_speed(op) if speed else emit_lif(op)
+
+        if speed and plain_delayed_subtract(op.semantics):
+            return emit_lif_fast(op, fp16_target=target_idx)
 
         idx = layer_index_of(op.current)
         current_ref = buffer_ref(op.current)
@@ -419,7 +433,7 @@ def dense_input_plan(module: ExecutionModule, window: int = 1) -> Optional[Dense
 
 
 DENSE_WINDOW_HELPERS = """
-/* ---- windowed dense MVP realization of the input layer ---- */
+/* ---- windowed dense MVP realization of the input layer (compiler/backend/efr32.py) ---- */
 #define ISCAS_WN_T16   ((uint32_t)SLI_MVP_DATATYPE_BINARY16 << _MVP_ARRAYDIM0CFG_BASETYPE_SHIFT)
 #define ISCAS_WN_T16C  ((uint32_t)SLI_MVP_DATATYPE_COMPLEX_BINARY16 << _MVP_ARRAYDIM0CFG_BASETYPE_SHIFT)
 #define ISCAS_WN_DIM(size, stride) ((((uint32_t)(size) - 1u) << _MVP_ARRAYDIM1CFG_SIZE_SHIFT) | ((uint32_t)(stride) << _MVP_ARRAYDIM1CFG_STRIDE_SHIFT))

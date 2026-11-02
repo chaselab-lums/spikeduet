@@ -22,12 +22,18 @@ clock and MVP), so time deltas transfer, but energy deltas transfer only if the 
 is the same. Use a ``BoardPower`` with measured states for another board; ``scaled()`` is a what-if
 for a common power scale only.
 """
+
+
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Dict, Mapping
 
-from spikeduet.backend.efr32.async_placement import AsyncCost, StepActivity, overlap_cost
+from dataclasses import dataclass, replace
+
+
+from typing import Dict, Mapping, Optional
+
+
+from spikeduet.backend.efr32.async_placement import AsyncCost, AsyncLayer, StepActivity, overlap_cost
 
 
 @dataclass(frozen=True)
@@ -48,16 +54,39 @@ class BoardPower:
                        p_cpu_mw=self.p_cpu_mw * factor, p_wait_mw=self.p_wait_mw * factor,
                        dp_mvp_mw=self.dp_mvp_mw * factor, sleep_saving_mw=self.sleep_saving_mw * factor)
 
+    def at_clock(self, clock_hz: float, floor_prop: float = 0.33) -> "BoardPower":
+        """ESTIMATE of the same board at another SYSCLK (NOT measured; only 39 MHz was). Dynamic power at a fixed core
+        voltage scales with f, so every increment over the EM1 floor (CPU compute, polling, the MVP, the EM1 sleep
+        saving) is scaled by f / f0; the EM1 floor itself is `(1 - floor_prop)` frequency-independent (board loads,
+        leakage) and `floor_prop` proportional to f (clock tree, RAM clocks). Cycle counts are assumed unchanged, so
+        `mapping_estimates` (time = cycles / clock_hz) then gives E(f) = cycles * (floor/f + dynamic per cycle).
 
-# Fitted on all measured builds. A power-state microbenchmark measured the same quantities directly:
-# CPU LIF 8.0, flash-parameter LIF 7.7, register loop 6.0, polling 6.56, MVP + polling CPU 9.8
-# (dp_mvp 3.2-3.35), EM1 3.98 mW.
+        Not modelled: flash wait states (flash-resident weights cost more cycles per word above ~40 MHz), the core-
+        voltage step (VSCALE) the part uses at 78-80 MHz, the HFXO -> DPLL source change, DC-DC efficiency vs load.
+        Datasheet cross-check (EFM32PG28 Rev 1.0, read 2026-10-21): the slope (p_cpu - p_em1) / 39 MHz = 25.6 uA/MHz sits
+        between the datasheet EM0-EM1 differences (while loop 10, CoreMark 23 uA/MHz); EM0 current vs f on HFRCO is
+        linear (0.358 mA + 19.5 uA/MHz * f, residuals < 7 uA over 1-38 MHz), i.e. a large f-independent part; MVP
+        current is flat in uA/MHz between 39 MHz (VSCALE1) and 78 MHz (VSCALE2) and durations scale exactly 1/f, so the
+        MVP increment is proportional to f. `floor_prop` = 0.33 is the central value: of the 1.21 mA EM1 floor about
+        0.5 mA is the HFXO (datasheet 498 uA, f-independent when SYSCLK is divided from the crystal) and about 0.4 mA is
+        clock tree/RAM (proportional to f); bracket 0 .. 0.5.
+        """
+        if not 0.0 <= floor_prop <= 1.0:
+            raise ValueError("floor_prop must be in [0, 1]")
+        k = clock_hz / self.clock_hz
+        floor = self.p_em1_mw * ((1.0 - floor_prop) + floor_prop * k)
+        return replace(self, name=f"{self.name} @ {clock_hz / 1e6:g} MHz (estimated)", clock_hz=clock_hz, p_em1_mw=floor,
+                       p_cpu_mw=floor + (self.p_cpu_mw - self.p_em1_mw) * k,
+                       p_wait_mw=floor + (self.p_wait_mw - self.p_em1_mw) * k,
+                       dp_mvp_mw=self.dp_mvp_mw * k, sleep_saving_mw=self.sleep_saving_mw * k)
+
+
 PG28_PRO_KIT = BoardPower(
     name="PG28 Pro Kit (EFM32PG28B310F1024IM68, 39 MHz HFXO, DC-DC)", clock_hz=39e6, p_em1_mw=3.98,
     p_cpu_mw=7.26, p_wait_mw=6.04, dp_mvp_mw=3.24,
-    sleep_saving_mw=1.26,      # MVP + CPU polling 9.52 mW -> MVP + CPU in EM1 8.26 mW; the SDK matvec with
-    #                            SL_MVP_POWER_MODE=1: 9.57 -> 8.16 mW at the same throughput
-    note="AEM at VMCU 3.29 V; includes board loads (EM1 level is ~3.1 mW above a bare chip)")
+    sleep_saving_mw=1.26,      # 2026-10-15, one session: MVP + CPU polling 9.52 mW -> MVP + CPU in EM1 8.26 mW; the SDK matvec
+    #                            with SL_MVP_POWER_MODE=1 went 9.57 -> 8.16 mW at an identical iteration count (no latency cost)
+    note="AEM at VMCU 3.29 V behind a 4.7 ohm sense resistor (UG545). VMCU feeds the EFM32PG28 domain, the EXP header and a few kit parts; the board controller is on an isolated domain. Vendor accuracy +-0.1 mA above 250 uA (common-mode across builds)")
 
 
 @dataclass(frozen=True)

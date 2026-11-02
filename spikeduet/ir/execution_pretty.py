@@ -1,8 +1,10 @@
 """Deterministic text dump of an ``ExecutionModule`` (buffers, preheader, loop body). Never prints weights."""
 
+
 from spikeduet.ir.execution import (
     AffineOp,
     ConvertOp,
+    DelayPushOp,
     ExecutionModule,
     LIFUpdateOp,
     TemporalMode,
@@ -18,22 +20,29 @@ def _buffer_line(module: ExecutionModule, name: str) -> str:
 
 
 def _format_op(op) -> str:
+    """Renders a single op as a pretty-printed line (shared by preheader
+    and loop-body formatting)."""
     if isinstance(op, ConvertOp):
         return f"  convert %{op.input} -> %{op.output}"
-    if isinstance(op, AffineOp):
+    elif isinstance(op, DelayPushOp):
+        return f"  delay   %{op.input} -> %{op.history}  (ring depth {op.depth})"
+    elif isinstance(op, AffineOp):
+        delayed = " delayed" if op.weight_layer.synapse_delays is not None else ""
         return (
             f"  affine  %{op.input} -> %{op.output}  "
-            f"({op.weight_layer.in_features} -> {op.weight_layer.out_features})"
+            f"({op.weight_layer.in_features} -> {op.weight_layer.out_features}{delayed})"
         )
-    if isinstance(op, LIFUpdateOp):
+    elif isinstance(op, LIFUpdateOp):
         s = op.semantics
         return (
             f"  lif     %{op.current}, %{op.membrane} -> %{op.output_spike}  "
             f"(reset={s.reset_mechanism}, reset_delay={s.reset_delay}, "
             f"inhibition={s.inhibition}, state_quant="
-            f"{'set' if s.state_quant is not None else 'None'})"
+            f"{'set' if s.state_quant is not None else 'None'}"
+            f"{', alif' if s.adaptation is not None else ''}{', spike_state' if s.spike_state else ''})"
         )
-    return f"  <unrecognized op: {type(op).__name__}>"
+    else:
+        return f"  <unrecognized op: {type(op).__name__}>"
 
 
 def format_execution_ir(module: ExecutionModule) -> str:

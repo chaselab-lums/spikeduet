@@ -13,6 +13,7 @@ from typing import Optional, Union
 from spikeduet.backend.base import Backend, GeneratedArtifact
 from spikeduet.backend.efr32.codegen import Efr32Backend
 from spikeduet.backend.portable_c import PortableCBackend
+from spikeduet.backend.cortex_m55 import CortexM55Backend
 from spikeduet.ir.execution import TemporalMode
 from spikeduet.ir.model import SNNModel
 from spikeduet.ir.pass_manager import PassManager, compile_source_to_execution_ir, get_pipeline
@@ -21,6 +22,7 @@ from spikeduet.ir.verifier import verify_module_ir
 _BACKENDS = {
     "portable_c": PortableCBackend,
     "efr32": Efr32Backend,
+    "cortex_m55": CortexM55Backend,
 }
 
 
@@ -47,7 +49,7 @@ def compile_model(
 
     Args:
         source: a parsed ``[Linear -> Leaky]^N`` model.
-        backend: ``"portable_c"`` or ``"efr32"``.
+        backend: ``"portable_c"``, ``"efr32"`` or ``"cortex_m55"``.
         num_timesteps: trip count of the timestep loop.
         input_temporal_mode: ``TemporalMode.INVARIANT`` for an input held constant over all steps,
             ``TemporalMode.VARYING`` (default) for one input vector per step.

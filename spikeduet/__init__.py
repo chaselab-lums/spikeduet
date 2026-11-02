@@ -12,6 +12,7 @@ Typical use::
 
 from spikeduet.backend.api import compile_model, get_backend
 from spikeduet.frontend.snntorch_parser import parse_snntorch_model
+from spikeduet.frontend.nir_parser import NIRImportError, parse_nir_graph, snntorch_chain_to_nir
 from spikeduet.ir.execution import TemporalMode
 from spikeduet.ir.pass_manager import compile_source_to_execution_ir, get_pipeline
 from spikeduet.ir.verifier import verify_module_ir
@@ -21,11 +22,14 @@ __version__ = "0.1.0"
 
 __all__ = [
     "TemporalMode",
+    "NIRImportError",
     "compile_model",
     "compile_source_to_execution_ir",
     "get_backend",
     "get_pipeline",
     "parse_snntorch_model",
+    "parse_nir_graph",
+    "snntorch_chain_to_nir",
     "run_sequence",
     "verify_module_ir",
 ]

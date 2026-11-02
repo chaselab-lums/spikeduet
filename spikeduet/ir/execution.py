@@ -8,11 +8,17 @@ It deliberately has no physical addresses, no CPU/accelerator placement and no r
 those are backend decisions.
 """
 
-from dataclasses import dataclass
+
+from dataclasses import dataclass, field
+
+
 from enum import Enum
+
+
 from typing import Optional, Tuple, Union
 
-from spikeduet.ir.model import LIFLayer, LinearLayer, StateQuantSpec
+
+from spikeduet.ir.model import AdaptiveThresholdSpec, LIFLayer, LinearLayer, StateQuantSpec
 
 
 class TemporalMode(Enum):
@@ -36,13 +42,18 @@ class StorageKind(Enum):
 
 
 class BufferKind(Enum):
-    """Role of a buffer in the schedule."""
+    """What role a logical buffer plays in the execution schedule."""
 
     INPUT = "input"
     STAGING = "staging"
     CURRENT = "current"
     MEMBRANE = "membrane"
     SPIKE = "spike"
+    # FilterBank extension buffers -- all stateful (zero-initialised once
+    # per inference, persisting across the temporal loop):
+    HISTORY = "history"          # input history ring of a delayed Linear layer, [(D+1)*in]
+    ADAPTATION = "adaptation"    # ALIF adaptation state A of a LIF layer
+    SPIKE_STATE = "spike_state"  # a LIF layer's stored previous binary spike
 
 
 @dataclass(frozen=True)
@@ -72,7 +83,26 @@ class Buffer:
 
 @dataclass(frozen=True)
 class LIFExecutionSpec:
-    """Immutable copy of an ``LIFLayer``'s semantics plus its neuron count."""
+    """Immutable snapshot of a `LIFLayer`'s snnTorch-faithful semantics,
+    for use inside `LIFUpdateOp`.
+
+    Part 7 of the B2 spec: "Source IR says WHAT the neuron means, Execution
+    IR says HOW that operation participates in the execution schedule."
+    This type exists so `LIFUpdateOp` never re-derives or re-implements
+    L1-L5 neuron semantics -- it is a plain, immutable copy of the exact
+    fields `compiler/ir/model.py::LIFLayer` already carries (beta,
+    threshold, reset_mechanism, reset_delay, graded_spikes_factor,
+    inhibition, state_quant), PLUS `num_neurons` -- the one piece of
+    information a `LIFLayer` does not itself store (source IR derives
+    neuron count structurally, from the preceding `LinearLayer.out_features`;
+    see `compiler/ir/verifier.py`), made explicit here so `LIFUpdateOp` and
+    `verify_execution_ir` never need to cross-reference the source IR to
+    know a buffer's expected size.
+
+    Construct via `LIFExecutionSpec.from_source`, never by hand-copying
+    fields -- keeps this the ONE place a `LIFLayer` is translated into its
+    execution-time counterpart.
+    """
 
     num_neurons: int
     beta: Tuple[float, ...]
@@ -82,6 +112,8 @@ class LIFExecutionSpec:
     graded_spikes_factor: Tuple[float, ...]
     inhibition: bool
     state_quant: Optional[StateQuantSpec]
+    adaptation: Optional[AdaptiveThresholdSpec] = None
+    spike_state: bool = False
 
     @staticmethod
     def from_source(lif: LIFLayer, num_neurons: int) -> "LIFExecutionSpec":
@@ -94,6 +126,8 @@ class LIFExecutionSpec:
             graded_spikes_factor=tuple(lif.graded_spikes_factor),
             inhibition=lif.inhibition,
             state_quant=lif.state_quant,
+            adaptation=lif.adaptation,
+            spike_state=lif.spike_state,
         )
 
 
@@ -110,14 +144,28 @@ class AffineOp:
 
 @dataclass(frozen=True)
 class LIFUpdateOp:
-    """One timestep of an LIF layer: reads ``current`` and ``membrane``, writes the updated
-    ``membrane`` and ``output_spike``."""
+    """One LIF layer's per-timestep recurrence.
+
+    `membrane` is read (the incoming state) AND written (the updated
+    state) by this op -- see `Buffer.stateful`. `current`/`output_spike`
+    are plain per-iteration values. `semantics` is the immutable,
+    source-derived `LIFExecutionSpec` this op must implement exactly (see
+    that type's docstring) -- this op never stores its own copy of
+    beta/threshold/etc. separately from `semantics`.
+    """
 
     id: str
     current: str
     membrane: str
     output_spike: str
     semantics: LIFExecutionSpec
+    # FilterBank extension state buffers (None for every ordinary layer):
+    # `spike_state` holds the previous timestep's binary spike when
+    # `semantics.spike_state`; `adapt` holds the ALIF adaptation state when
+    # `semantics.adaptation` is set. Both are stateful buffers this op reads
+    # AND updates in place, exactly like `membrane`.
+    spike_state: Optional[str] = None
+    adapt: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -134,7 +182,26 @@ class ConvertOp:
     output: str
 
 
-ExecutionOp = Union[AffineOp, LIFUpdateOp, ConvertOp]
+@dataclass(frozen=True)
+class DelayPushOp:
+    """Pushes this timestep's input vector into a delay-history ring
+    (FilterBank extension, see `LinearLayer.synapse_delays`).
+
+    `history` is a stateful buffer of `(depth + 1) * n` floats laid out
+    `history[d * n + i]` = element `i` of the input `d` timesteps ago; this
+    op shifts every slot one step older and writes `input` into slot 0. The
+    delayed `AffineOp` reading `history` then gathers each synapse's own
+    slot. `depth` is the maximum synapse delay `D`. Stateful and impure:
+    never hoistable, never fused.
+    """
+
+    id: str
+    input: str
+    history: str
+    depth: int
+
+
+ExecutionOp = Union[AffineOp, LIFUpdateOp, ConvertOp, DelayPushOp]
 
 
 @dataclass(frozen=True)
@@ -148,16 +215,36 @@ class TemporalLoop:
 
 @dataclass(frozen=True)
 class ExecutionModule:
-    """A lowered model.
+    """A fully lowered, executable `[Linear -> Leaky]^N` model.
 
     Attributes:
-        buffers: every logical buffer, in creation order.
-        loop: the top-level temporal loop (a one-element tuple).
-        num_timesteps: equal to ``loop[0].trip_count``.
-        input_buffer: name of the external input buffer.
-        output_buffer: name of the final layer's spike buffer.
-        preheader_ops: ops that run once before the loop; empty after lowering and filled by
-            passes such as ``InvariantAffineHoistingPass``.
+        buffers: Every logical buffer in the module, in a fixed
+            (creation) order -- used as pretty-printing/iteration order,
+            not a legality constraint. Look up by name via `get_buffer`.
+        loop: The model's single top-level `TemporalLoop`. A tuple of
+            length 1 in B2 (kept as a tuple, not a bare field, so a future
+            phase that needs pre-loop or post-loop top-level ops -- e.g. a
+            hoisted invariant affine, B4 -- has somewhere to put them
+            without changing this field's type).
+        num_timesteps: Same value as `loop.trip_count`, exposed at the
+            module level for convenience (pretty-printing, tests).
+        input_buffer: Name of the model's external input buffer.
+        output_buffer: Name of the final layer's spike buffer -- the
+            model's output. (Readout/argmax is a runtime policy, not
+            represented here -- see this module's docstring.)
+        preheader_ops: Operations that execute exactly once, BEFORE the
+            temporal loop (B4 Phase A). Empty after lowering; populated
+            only by explicit compiler passes such as
+            `InvariantAffineHoistingPass`. Structural placement: an op
+            in `preheader_ops` is definitionally outside the temporal
+            loop -- no `hoisted=True` metadata flag or runtime predicate.
+            Placed last (with a default of `()`) so all existing
+            constructor calls remain compatible.
+        readout_weights: Per-timestep weights of the readout (length
+            `num_timesteps`), or `None` for the standard unweighted
+            sum of the final membrane over time. Carried through from
+            `SNNModel.readout_weights`; the readout itself remains a
+            backend-generated policy (accumulate, then argmax).
     """
 
     buffers: Tuple[Buffer, ...]
@@ -166,6 +253,7 @@ class ExecutionModule:
     input_buffer: str
     output_buffer: str
     preheader_ops: Tuple[ExecutionOp, ...] = ()
+    readout_weights: Optional[Tuple[float, ...]] = None
 
     def get_buffer(self, name: str) -> Buffer:
         for b in self.buffers:
@@ -174,7 +262,8 @@ class ExecutionModule:
         raise KeyError(f"no buffer named {name!r} in this ExecutionModule")
 
     def walk_ops(self) -> Tuple[ExecutionOp, ...]:
-        """Every op in program order: preheader first, then each loop body."""
+        """Every op in the module, in program order: preheader ops first
+        (B4), then flattened across all temporal-loop bodies."""
         ops = list(self.preheader_ops)
         for region in self.loop:
             ops.extend(region.body)
@@ -187,26 +276,37 @@ def op_is_pure(op: ExecutionOp) -> bool:
 
 
 def op_reads_state(op: ExecutionOp) -> bool:
-    return isinstance(op, LIFUpdateOp)
+    """Whether `op` reads recurrent/stateful buffer(s) (membrane)."""
+    return isinstance(op, (LIFUpdateOp, DelayPushOp))
 
 
 def op_writes_state(op: ExecutionOp) -> bool:
-    return isinstance(op, LIFUpdateOp)
+    """Whether `op` writes recurrent/stateful buffer(s) (membrane)."""
+    return isinstance(op, (LIFUpdateOp, DelayPushOp))
 
 
 def op_runtime_inputs(op: ExecutionOp) -> Tuple[str, ...]:
-    """Buffers ``op`` reads at runtime (weights are compile-time constants)."""
-    if isinstance(op, (ConvertOp, AffineOp)):
+    """Buffer names `op` reads at runtime (excludes compile-time
+    constants like `AffineOp.weight_layer`)."""
+    if isinstance(op, ConvertOp):
         return (op.input,)
-    if isinstance(op, LIFUpdateOp):
-        return (op.current, op.membrane)
+    elif isinstance(op, AffineOp):
+        return (op.input,)
+    elif isinstance(op, DelayPushOp):
+        return (op.input, op.history)
+    elif isinstance(op, LIFUpdateOp):
+        return tuple(b for b in (op.current, op.membrane, op.spike_state, op.adapt) if b is not None)
     return ()
 
 
 def op_outputs(op: ExecutionOp) -> Tuple[str, ...]:
-    """Buffers ``op`` defines."""
-    if isinstance(op, (ConvertOp, AffineOp)):
+    """Buffer names `op` produces/defines."""
+    if isinstance(op, ConvertOp):
         return (op.output,)
-    if isinstance(op, LIFUpdateOp):
+    elif isinstance(op, AffineOp):
+        return (op.output,)
+    elif isinstance(op, DelayPushOp):
+        return (op.history,)
+    elif isinstance(op, LIFUpdateOp):
         return (op.output_spike,)
     return ()

@@ -1,3 +1,5 @@
 -r requirements.txt
 pytest>=7
 pyserial>=3.5            # tools/hil: UART protocol to the board
+nir>=1.0.8,<2           # NIR import/export and round-trip tests
+nirtorch>=2.6,<3

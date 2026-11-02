@@ -1,8 +1,11 @@
 """Human-readable and dict summaries of the source IR (shapes and hyperparameters, never weights)."""
 
+
 from typing import List, Optional
 
+
 from spikeduet.ir.model import LIFLayer, LinearLayer, SNNModel, StateQuantSpec
+
 
 _PREVIEW_LIMIT = 4
 
@@ -27,8 +30,15 @@ def _format_state_quant(spec: Optional[StateQuantSpec]) -> str:
 
 
 def format_module_ir(model: SNNModel) -> str:
-    """One line per Linear layer and an indented block per LIF layer. Long per-neuron vectors are
-    previewed. Does not verify the model."""
+    """Renders `model` as a concise, human-readable summary.
+
+    One line per Linear layer (dimensions, bias presence) and an indented
+    block per LIF layer covering every field `LIFLayer` carries. Does not
+    require `model` to have passed `spikeduet.ir.verifier.verify_module_ir`
+    -- this is a debugging aid, not a correctness check -- but assumes the
+    same `[Linear -> Leaky]^N` shape the rest of Backend/IR V1 does; an
+    unrecognized layer kind is rendered inline rather than raising.
+    """
     lines = ["SNNModel"]
     linear_index = 0
     lif_index = 0
@@ -39,6 +49,7 @@ def format_module_ir(model: SNNModel) -> str:
             lines.append(
                 f"  Linear[{linear_index}]: {layer.in_features} -> "
                 f"{layer.out_features}, bias={layer.bias is not None}"
+                + (f", synapse_delays(0..{int(layer.synapse_delays.max())})" if layer.synapse_delays is not None else "")
             )
             prev_linear = layer
             linear_index += 1
@@ -54,6 +65,11 @@ def format_module_ir(model: SNNModel) -> str:
             lines.append(f"      reset_delay={layer.reset_delay}")
             lines.append(f"      inhibition={layer.inhibition}")
             lines.append(f"      {_format_state_quant(layer.state_quant)}")
+            if layer.spike_state:
+                lines.append("      spike_state=True (reset keyed on the stored previous spike)")
+            if layer.adaptation is not None:
+                lines.append(f"      {_format_param('adaptation.rho', list(layer.adaptation.rho), num_neurons)}")
+                lines.append(f"      {_format_param('adaptation.a', list(layer.adaptation.a), num_neurons)}")
             lif_index += 1
         else:
             lines.append(f"  <unrecognized layer: {type(layer).__name__}>")
@@ -62,12 +78,23 @@ def format_module_ir(model: SNNModel) -> str:
         lines.append(f"  num_steps={model.num_steps}")
     if model.readout is not None:
         lines.append(f"  readout={model.readout!r}")
+    if model.readout_weights is not None:
+        lines.append(f"  readout_weights=per_timestep(n={len(model.readout_weights)}, {_preview(model.readout_weights)})")
 
     return "\n".join(lines)
 
 
 def module_ir_to_dict(model: SNNModel) -> dict:
-    """JSON-serializable structural summary: dimensions and parameter lengths, never values."""
+    """Deterministic, JSON-serializable structural summary of `model`.
+
+    Same information `format_module_ir` shows, as a plain dict of shapes
+    and hyperparameters -- e.g. for generating the hand-written
+    `validation/*/model_meta.json` metadata convention programmatically.
+    Never includes weight/bias/beta/threshold/graded_spikes_factor/
+    state_quant *values*, only their lengths -- this is a structural
+    summary, not a weight-serialization format (`compiler/codegen.py`
+    already owns the one place full numeric values are emitted).
+    """
     layers = []
     prev_linear: Optional[LinearLayer] = None
 
@@ -80,6 +107,7 @@ def module_ir_to_dict(model: SNNModel) -> dict:
                     "in_features": layer.in_features,
                     "out_features": layer.out_features,
                     "bias": layer.bias is not None,
+                    **({"synapse_delay_max": int(layer.synapse_delays.max())} if layer.synapse_delays is not None else {}),
                 }
             )
         elif isinstance(layer, LIFLayer):
@@ -97,6 +125,8 @@ def module_ir_to_dict(model: SNNModel) -> dict:
                     "state_quant_levels": (
                         len(layer.state_quant.levels) if layer.state_quant is not None else None
                     ),
+                    **({"spike_state": True} if layer.spike_state else {}),
+                    **({"adaptation_len": len(layer.adaptation.rho)} if layer.adaptation is not None else {}),
                 }
             )
         else:
@@ -106,4 +136,5 @@ def module_ir_to_dict(model: SNNModel) -> dict:
         "layers": layers,
         "num_steps": model.num_steps,
         "readout": model.readout,
+        **({"readout_weights_len": len(model.readout_weights)} if model.readout_weights is not None else {}),
     }

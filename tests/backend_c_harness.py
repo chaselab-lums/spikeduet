@@ -196,3 +196,69 @@ int main(int argc, char **argv) {{
         "verify": np.array([[int(v) for v in r[1 + n_out:]] for r in rows]),
     }
 
+
+
+_MEMSUM_DRIVER = r'''
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "portable_runtime.h"
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+int main(void) {
+    int n = 0, len = 0;
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
+    if (fread(&n, sizeof(int), 1, stdin) != 1 || fread(&len, sizeof(int), 1, stdin) != 1) return 2;
+    float *x = (float *)malloc((size_t)len * sizeof(float));
+    iscas_model_init();
+    for (int s = 0; s < n; s++) {
+        if (fread(x, sizeof(float), (size_t)len, stdin) != (size_t)len) return 3;
+        iscas_model_run(x);
+        int dim = 0;
+        const float *m = iscas_model_last_mem_sum(&dim);
+        for (int j = 0; j < dim; j++) {
+            unsigned int u;
+            memcpy(&u, &m[j], sizeof u);
+            printf("%08x%c", u, j + 1 == dim ? '\n' : ' ');
+        }
+    }
+    free(x);
+    return 0;
+}
+'''
+
+
+def run_memsum(files: dict, out_dir: Path, samples: Sequence[Sequence[float]], *,
+               sources: Sequence[str] = ("portable_runtime.c",), cflags: Sequence[str] = ()) -> List[List[int]]:
+    """Compiles generated runtime sources with a driver that prints the readout's summed output membrane of
+    every sample as IEEE-754 bit patterns (`ISCAS_PORTABLE_EXPOSE_MEMSUM`), and returns them as uint32 lists.
+    Every sample is the flat input of one `iscas_model_run()` call ([T][features] for temporal models).
+    Works for any backend that keeps the portable `iscas_model_*` API (portable-C, Cortex-M55)."""
+    assert CC is not None, "no host C compiler (gcc/clang) found on PATH"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, content in files.items():
+        (out_dir / name).write_text(content)
+    (out_dir / "memsum_driver.c").write_text(_MEMSUM_DRIVER)
+    exe = out_dir / ("memsum_driver" + (".exe" if os.name == "nt" else ""))
+    cmd = [CC, "-std=c99", "-O2", "-ffp-contract=off", "-Wall", "-Wextra", "-Werror", "-DISCAS_PORTABLE_EXPOSE_MEMSUM",
+           *cflags, *[str(out_dir / s) for s in sources], str(out_dir / "memsum_driver.c"), "-o", str(exe), "-lm"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"compile failed:\n{result.stdout}\n{result.stderr}"
+    length = len(samples[0])
+    payload = struct.pack("ii", len(samples), length)
+    for s in samples:
+        assert len(s) == length
+        payload += struct.pack(f"{length}f", *s)
+    run = subprocess.run([str(exe)], input=payload, capture_output=True)
+    assert run.returncode == 0, f"memsum driver failed: {run.stderr}"
+    return [[int(h, 16) for h in line.split()] for line in run.stdout.decode().splitlines() if line.strip()]
+
+
+def float_bits(t) -> List[int]:
+    """float32 values -> IEEE-754 bit patterns (as uint32 ints)."""
+    import numpy as np
+    return [int(v) for v in np.asarray(t, dtype=np.float32).view(np.uint32).ravel()]
